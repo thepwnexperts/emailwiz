@@ -1,43 +1,23 @@
 #!/bin/sh
 
-# THE SETUP
+# BEFORE INSTALLING
 
-# Mail will be stored in non-retarded Maildirs because it's $currentyear.  This
-# makes it easier for use with isync, which is what I care about so I can have
-# an offline repo of mail.
-
-# The mailbox names are: Inbox, Sent, Drafts, Archive, Junk, Trash
-
-# Use the typical unix login system for mail users. Users will log into their
-# email with their passnames on the server. No usage of a redundant mySQL
-# database to do this.
-
-# DEPENDENCIES BEFORE RUNNING
-
-# 1. Have a Debian system with a static IP and all that. Pretty much any
-# default VPS offered by a company will have all the basic stuff you need. This
-# script might run on Ubuntu as well. Haven't tried it. If you have, tell me
-# what happens.
-
-# 2. Have a Let's Encrypt SSL certificate for $maildomain. You might need one
-# for $domain as well, but they're free with Let's Encypt so you should have
-# them anyway.
-
-# 3. If you've been toying around with your server settings trying to get
-# postfix/dovecot/etc. working before running this, I recommend you `apt purge`
-# everything first because this script is build on top of only the defaults.
-# Clear out /etc/postfix and /etc/dovecot yourself if needbe.
+# Have a Debian or Ubuntu server with a static IP and DNS records (usually
+# A/AAAA) that point your domain name to it.
 
 # NOTE WHILE INSTALLING
 
 # On installation of Postfix, select "Internet Site" and put in TLD (without
 # `mail.` before it).
 
+# AFTER INSTALLING
+
+# More DNS records will be given to you to install. One of them will be
+# different for every installation and is uniquely generated on your machine.
+
 umask 0022
 
-apt-get install -y postfix postfix-pcre dovecot-imapd dovecot-sieve opendkim spamassassin spamc net-tools
-# Check if OpenDKIM is installed and install it if not.
-which opendkim-genkey >/dev/null 2>&1 || apt-get install opendkim-tools
+apt-get install -y postfix postfix-pcre dovecot-imapd dovecot-sieve opendkim opendkim-tools spamassassin spamc net-tools fail2ban
 domain="$(cat /etc/mailname)"
 subdom=${MAIL_SUBDOM:-mail}
 maildomain="$subdom.$domain"
@@ -67,7 +47,9 @@ done
 		apt install -y python3-certbot
 		certbot -d "$maildomain" certonly --standalone --register-unsafely-without-email --agree-tos
 		;;
-esac || exit $1
+esac
+
+[ ! -d "$certdir" ] && echo "Error locating or installing SSL certificate." && exit 1
 
 echo "Configuring Postfix's main.cf..."
 
@@ -101,10 +83,13 @@ postconf -e 'smtpd_sasl_auth_enable = yes'
 postconf -e 'smtpd_sasl_type = dovecot'
 postconf -e 'smtpd_sasl_path = private/auth'
 
-# Sender, relay and recipient restrictions
+# helo, sender, relay and recipient restrictions
 postconf -e "smtpd_sender_login_maps = pcre:/etc/postfix/login_maps.pcre"
+postconf -e 'smtpd_sender_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_sender_login_mismatch, reject_unknown_reverse_client_hostname, reject_unknown_sender_domain'
 postconf -e 'smtpd_recipient_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_unauth_destination, reject_unknown_recipient_domain'
 postconf -e 'smtpd_relay_restrictions = permit_sasl_authenticated, reject_unauth_destination'
+postconf -e 'smtpd_helo_required = yes'
+postconf -e 'smtpd_helo_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_invalid_helo_hostname, reject_non_fqdn_helo_hostname, reject_unknown_helo_hostname'
 
 # NOTE: the trailing slash here, or for any directory name in the home_mailbox
 # command, is necessary as it distinguishes a maildir (which is the actual
@@ -160,7 +145,6 @@ echo "# Dovecot config
 # %d for the domain
 # %h the user's home directory
 
-# If you're not a brainlet, SSL must be set to required.
 ssl = required
 ssl_cert = <$certdir/fullchain.pem
 ssl_key = <$certdir/privkey.pem
@@ -168,7 +152,6 @@ ssl_min_protocol = TLSv1.2
 ssl_cipher_list = "'EECDH+ECDSA+AESGCM:EECDH+aRSA+AESGCM:EECDH+ECDSA+SHA256:EECDH+aRSA+SHA256:EECDH+ECDSA+SHA384:EECDH+ECDSA+SHA256:EECDH+aRSA+SHA384:EDH+aRSA+AESGCM:EDH+aRSA+SHA256:EDH+aRSA:EECDH:!aNULL:!eNULL:!MEDIUM:!LOW:!3DES:!MD5:!EXP:!PSK:!SRP:!DSS:!RC4:!SEED'"
 ssl_prefer_server_ciphers = yes
 ssl_dh = </usr/share/dovecot/dh.pem
-# Plaintext login. This is safe and easy thanks to SSL.
 auth_mechanisms = plain login
 auth_username_format = %n
 
@@ -210,7 +193,6 @@ namespace inbox {
 }
 
 # Here we let Postfix use Dovecot's authetication system.
-
 service auth {
   unix_listener /var/spool/postfix/private/auth {
 	mode = 0660
@@ -311,16 +293,22 @@ postconf -e 'milter_protocol = 6'
 postconf -e 'smtpd_milters = inet:localhost:12301'
 postconf -e 'non_smtpd_milters = inet:localhost:12301'
 postconf -e 'mailbox_command = /usr/lib/dovecot/deliver'
-postconf -e 'smtpd_helo_required = yes'
-postconf -e 'smtpd_helo_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_invalid_helo_hostname, reject_non_fqdn_helo_hostname, reject_unknown_helo_hostname'
-postconf -e 'smtpd_sender_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_sender_login_mismatch, reject_unknown_reverse_client_hostname, reject_unknown_sender_domain'
-
 
 # A fix for "Opendkim won't start: can't open PID file?", as specified here: https://serverfault.com/a/847442
 /lib/opendkim/opendkim.service.generate
 systemctl daemon-reload
 
-for x in spamassassin opendkim dovecot postfix; do
+# Enable fail2ban security for dovecot and postfix.
+[ ! -f /etc/fail2ban/jail.d/emailwiz.local ] && echo "[postfix]
+enabled = true
+[postfix-sasl]
+enabled = true
+[sieve]
+enabled = true
+[dovecot]
+enabled = true" > /etc/fail2ban/jail.d/emailwiz.local
+
+for x in spamassassin opendkim dovecot postfix fail2ban; do
 	printf "Restarting %s..." "$x"
 	service "$x" restart && printf " ...done\\n"
 	systemctl enable "$x"
@@ -330,16 +318,27 @@ pval="$(tr -d '\n' <"/etc/postfix/dkim/$domain/$subdom.txt" | sed "s/k=rsa.* \"p
 dkimentry="$subdom._domainkey.$domain	TXT	v=DKIM1; k=rsa; $pval"
 dmarcentry="_dmarc.$domain	TXT	v=DMARC1; p=reject; rua=mailto:dmarc@$domain; fo=1"
 spfentry="$domain	TXT	v=spf1 mx a:$maildomain -all"
+mxentry="$domain	MX	10	$maildomain	300"
 
 useradd -m -G mail dmarc
+
+# Create a cronjob that deletes month-old dmarc feedback:
+cat <<EOF > /etc/cron.weekly/dmarc-clean
+#!/bin/sh
+
+find /home/dmarc/Mail -type f -mtime +30 -name '*.mail*' -delete
+EOF
+chmod 755 /etc/cron.weekly/dmarc-clean
 
 grep -q '^deploy-hook = echo "$RENEWED_DOMAINS" | grep -q' /etc/letsencrypt/cli.ini ||
 	echo "
 deploy-hook = echo \"\$RENEWED_DOMAINS\" | grep -q '$maildomain' && service postfix reload && service dovecot reload" >> /etc/letsencrypt/cli.ini
 
-echo "$dkimentry
+echo "NOTE: Elements in the entries might appear in a different order in your registrar's DNS settings.
+$dkimentry
 $dmarcentry
-$spfentry" > "$HOME/dns_emailwizard"
+$spfentry
+$mxentry" > "$HOME/dns_emailwizard"
 
 printf "\033[31m
  _   _
@@ -356,6 +355,8 @@ $dkimentry
 $dmarcentry
 
 $spfentry
+
+$mxentry
 \033[0m
 NOTE: You may need to omit the \`.$domain\` portion at the beginning if
 inputting them in a registrar's web interface.
