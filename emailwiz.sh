@@ -287,7 +287,7 @@ sed -i '/^SOCKET/d' /etc/default/opendkim && echo "SOCKET=\"inet:12301@localhost
 echo 'Configuring Postfix with OpenDKIM settings...'
 postconf -e 'smtpd_sasl_security_options = noanonymous, noplaintext'
 postconf -e 'smtpd_sasl_tls_security_options = noanonymous'
-postconf -e "myhostname = $domain"
+postconf -e "myhostname = $maildomain"
 postconf -e 'milter_default_action = accept'
 postconf -e 'milter_protocol = 6'
 postconf -e 'smtpd_milters = inet:localhost:12301'
@@ -307,6 +307,9 @@ enabled = true
 enabled = true
 [dovecot]
 enabled = true" > /etc/fail2ban/jail.d/emailwiz.local
+
+# Enable SpamAssassin update cronjob.
+sed -i "s|^CRON=0|CRON=1|" /etc/default/spamassassin
 
 for x in spamassassin opendkim dovecot postfix fail2ban; do
 	printf "Restarting %s..." "$x"
